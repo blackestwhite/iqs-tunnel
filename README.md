@@ -13,7 +13,8 @@ This project is a research prototype for studying DNS-based uplink transport, sp
 
 ## Warning
 
-IP spoofing can be disruptive, may violate provider policies, and can be illegal or unauthorized on many networks. Use IQS-Tunnel only in environments you own or are explicitly authorized to test, and only for controlled research, lab work, or defensive experimentation.
+> [!WARNING]
+> IP spoofing can be disruptive, may violate provider policies, and can be illegal or unauthorized on many networks. Use IQS-Tunnel only in environments you own or are explicitly authorized to test, and only for controlled research, lab work, or defensive experimentation.
 
 ## What Changed
 
@@ -80,16 +81,27 @@ sequenceDiagram
 
 ## Run
 
+Build the binaries:
+
 ```bash
-go run ./cmd/iqs-server -config configs/server.example.json
-go run ./cmd/iqs-client -config configs/client.example.json
+go build -o bin/iqs-server ./cmd/iqs-server
+go build -o bin/iqs-client ./cmd/iqs-client
 ```
+
+Then run them:
+
+```bash
+./bin/iqs-server -config configs/server.example.json
+./bin/iqs-client -config configs/client.example.json
+```
+
+If you downloaded a release archive from the GitHub Releases page, use the included `iqs-server` and `iqs-client` binaries directly instead of building locally.
 
 You can also print the embedded build version:
 
 ```bash
-go run ./cmd/iqs-server -version
-go run ./cmd/iqs-client -version
+./bin/iqs-server -version
+./bin/iqs-client -version
 ```
 
 ## Protocol Summary
