@@ -7,6 +7,10 @@ IQS-Tunnel is an improved Go rewrite of QS-Tunnel. It keeps the same asymmetric 
 
 The difference is that IQS-Tunnel adds a reliability layer around that transport instead of sending blindly.
 
+Original QS-Tunnel repository:
+
+https://github.com/patterniha/QS-Tunnel
+
 ## Research Notice
 
 This project is a research prototype for studying DNS-based uplink transport, spoofed UDP downlink behavior, and reliability techniques around asymmetric tunnels. It is not presented as a production-ready censorship circumvention product.
