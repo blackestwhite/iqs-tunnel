@@ -50,6 +50,34 @@ The repository includes a GitHub Actions workflow that cross-builds release arch
 
 When a tag like `v0.1.0` is pushed, the workflow attaches archives and a `SHA256SUMS.txt` file to the GitHub release page.
 
+## High-Level Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Local UDP App
+    participant Client as IQS Client
+    participant Resolver as DNS Resolver
+    participant Server as IQS Server
+    participant Upstream as Upstream UDP Service
+
+    App->>Client: UDP payload
+    Client->>Resolver: DNS query with encoded tunnel fragments
+    Resolver->>Server: Forward authoritative query
+    Server-->>Resolver: DNS TXT response with signed ACK report
+    Resolver-->>Client: DNS reply
+
+    Note over Client,Server: Uplink reliability lives on DNS ACK/ACK-bits
+
+    Server->>Upstream: Forward recovered UDP payload
+    Upstream->>Server: UDP response
+
+    Note over Server,Client: Downlink uses spoofed UDP + client ACKs piggybacked in later DNS uplink packets
+
+    Server-->>Client: Spoofed UDP tunnel fragments
+    Client->>App: Reassembled UDP payload
+```
+
 ## Run
 
 ```bash
