@@ -1,0 +1,14 @@
+{
+  "secret": "replace-with-a-shared-secret",
+  "listen_dns": ":53",
+  "domains": [
+    "iqs.example.com"
+  ],
+  "upstream_address": "127.0.0.1:443",
+  "downlink_payload_bytes": 900,
+  "downlink_parity_shards": 1,
+  "downlink_retransmit_ms": 1800,
+  "session_timeout_ms": 90000,
+  "spoof_ttl": 128,
+  "upstream_read_buffer_size": 65536
+}

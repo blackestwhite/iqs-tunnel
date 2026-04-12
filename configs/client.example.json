@@ -1,0 +1,29 @@
+{
+  "secret": "replace-with-a-shared-secret",
+  "session_id": 0,
+  "local_bind": "127.0.0.1:10443",
+  "wan_bind": "0.0.0.0:0",
+  "resolvers": [
+    "1.1.1.1:53",
+    "8.8.8.8:53"
+  ],
+  "domains": [
+    "iqs.example.com"
+  ],
+  "fake_send_ip": "198.51.100.10",
+  "fake_send_port": 443,
+  "public_ip": "",
+  "public_ip_url": "https://icanhazip.com",
+  "max_qname_len": 253,
+  "max_label_len": 63,
+  "query_timeout_ms": 1800,
+  "retransmit_ms": 2400,
+  "ack_flush_ms": 250,
+  "keepalive_fast_ms": 3000,
+  "keepalive_slow_ms": 12000,
+  "info_refresh_ms": 20000,
+  "dns_payload_bytes": 0,
+  "queue_size": 1024,
+  "resolver_cooldown_ms": 5000,
+  "resolver_failure_weight": 2500
+}
