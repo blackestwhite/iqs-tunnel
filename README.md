@@ -37,6 +37,32 @@ The reason is simple: the original idea is lightweight, but also much more depen
 
 In other words, this project does not try to be the smallest possible wrapper around QS-Tunnel. It tries to be a more observable, debuggable, and recoverable research transport, even if that means extra header cost and lower raw efficiency.
 
+## Performance Trade-Offs
+
+The current design can absolutely be slower than a lighter QS-style tunnel, especially for small packets.
+
+These are rough theoretical overhead estimates from the current framing design, not real-world benchmark numbers:
+
+| Traffic shape | Rough byte expansion | Practical meaning |
+|---|---:|---|
+| Small uplink payloads around 64 bytes | about 1.95x | noticeably worse goodput |
+| Medium uplink payloads around 256 bytes | about 1.27x | moderate overhead |
+| Larger uplink payloads around 512 bytes | about 1.14x | smaller but still visible cost |
+| Large uplink payloads around 1024 bytes | about 1.07x | relatively mild overhead |
+| Small downlink payloads around 64 bytes | about 2.31x | very expensive for chatty traffic |
+| Medium downlink payloads around 256 bytes | about 1.33x | meaningful overhead |
+| Larger downlink payloads around 512 bytes | about 1.16x | still measurable |
+| Downlink payloads near the fragmentation threshold with default parity enabled | about 2.05x to 2.17x | can become almost twice as heavy |
+
+In short:
+
+- small and chatty traffic can get a lot slower
+- medium traffic usually pays a visible penalty
+- large packets suffer less
+- the default parity setting on the downlink is one of the biggest cost multipliers
+
+So the honest trade-off is this: IQS-Tunnel is trying to be more recoverable and easier to reason about, not maximally lightweight. In some networks that trade-off may be worth it, and in others it may not.
+
 ## Layout
 
 - `cmd/iqs-client`: local client binary
