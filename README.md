@@ -112,3 +112,11 @@ You can also print the embedded build version:
 4. The authoritative server reassembles the packet, forwards the UDP payload upstream, and returns a TXT ACK report in the DNS response.
 5. Upstream responses are wrapped in signed downlink packets, fragmented if needed, and sent back as spoofed UDP.
 6. The client reassembles them, forwards the payload locally, and piggybacks downlink ACK state on later DNS uplink packets.
+
+## Support The Project
+
+If this project helps people connect to the internet, please consider donating to keep it alive and support further work.
+
+BEP-20 USDT (BNB Chain):
+
+`0x2455B82cEAD31ceC026ae930B932a22Bb994FB76`
