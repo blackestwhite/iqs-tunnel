@@ -25,6 +25,14 @@ This project is a research prototype for studying DNS-based uplink transport, sp
 - The client keeps basic performance scores for resolvers and prefers healthier ones.
 - Optional single-parity shard protection is available on the spoofed downlink path.
 
+## On Overhead and Trade-Offs
+
+One fair criticism of this design is that it adds more control metadata than the original QS-Tunnel approach. That criticism is true in spirit: IQS-Tunnel deliberately spends extra bytes on sequencing, acknowledgements, session tracking, cache-busting, and packet authentication.
+
+The reason is simple: the original idea is lightweight, but also much more dependent on luck. Once DNS queries are dropped, reordered, cached, duplicated, or partially lost, a tunnel without feedback becomes hard to reason about and hard to recover. IQS-Tunnel chooses to pay additional overhead in exchange for better visibility into what arrived, what was lost, and what should be retransmitted.
+
+In other words, this project does not try to be the smallest possible wrapper around QS-Tunnel. It tries to be a more observable, debuggable, and recoverable research transport, even if that means extra header cost and lower raw efficiency.
+
 ## Layout
 
 - `cmd/iqs-client`: local client binary
