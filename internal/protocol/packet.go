@@ -15,18 +15,12 @@ const (
 
 	TypeInfo uint8 = iota + 1
 	TypeData
-	TypeAckOnly
-	TypeKeepalive
 )
 
 type Packet struct {
 	Version   uint8
 	Type      uint8
-	Flags     uint8
 	SessionID uint64
-	Seq       uint32
-	Ack       uint32
-	AckBits   uint64
 	Payload   []byte
 }
 
@@ -44,16 +38,11 @@ func (p Packet) Marshal(secret []byte) ([]byte, error) {
 	if len(p.Payload) > 65535 {
 		return nil, fmt.Errorf("payload too large: %d", len(p.Payload))
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, 34+len(p.Payload)+PacketMACSize))
+	buf := bytes.NewBuffer(make([]byte, 0, 16+len(p.Payload)+PacketMACSize))
 	buf.WriteString(PacketMagic)
 	buf.WriteByte(p.Version)
 	buf.WriteByte(p.Type)
-	buf.WriteByte(p.Flags)
-	buf.WriteByte(0)
 	_ = binary.Write(buf, binary.BigEndian, p.SessionID)
-	_ = binary.Write(buf, binary.BigEndian, p.Seq)
-	_ = binary.Write(buf, binary.BigEndian, p.Ack)
-	_ = binary.Write(buf, binary.BigEndian, p.AckBits)
 	_ = binary.Write(buf, binary.BigEndian, uint16(len(p.Payload)))
 	buf.Write(p.Payload)
 	buf.Write(computeMAC(buf.Bytes(), secret))
@@ -61,7 +50,7 @@ func (p Packet) Marshal(secret []byte) ([]byte, error) {
 }
 
 func UnmarshalPacket(raw, secret []byte) (Packet, error) {
-	if len(raw) < 34+PacketMACSize {
+	if len(raw) < 16+PacketMACSize {
 		return Packet{}, fmt.Errorf("packet too short")
 	}
 	if string(raw[:4]) != PacketMagic {
@@ -74,22 +63,18 @@ func UnmarshalPacket(raw, secret []byte) (Packet, error) {
 	if body[4] != PacketVersion {
 		return Packet{}, fmt.Errorf("unsupported packet version %d", body[4])
 	}
-	payloadLen := binary.BigEndian.Uint16(body[32:34])
-	if int(34+payloadLen) != len(body) {
+	payloadLen := binary.BigEndian.Uint16(body[14:16])
+	if int(16+payloadLen) != len(body) {
 		return Packet{}, fmt.Errorf("invalid packet payload length")
 	}
 	packet := Packet{
 		Version:   body[4],
 		Type:      body[5],
-		Flags:     body[6],
-		SessionID: binary.BigEndian.Uint64(body[8:16]),
-		Seq:       binary.BigEndian.Uint32(body[16:20]),
-		Ack:       binary.BigEndian.Uint32(body[20:24]),
-		AckBits:   binary.BigEndian.Uint64(body[24:32]),
+		SessionID: binary.BigEndian.Uint64(body[6:14]),
 	}
 	if payloadLen > 0 {
 		packet.Payload = make([]byte, payloadLen)
-		copy(packet.Payload, body[34:])
+		copy(packet.Payload, body[16:])
 	}
 	return packet, nil
 }

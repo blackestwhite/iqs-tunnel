@@ -22,8 +22,6 @@ type Client struct {
 	MaxQNameLen           int      `json:"max_qname_len"`
 	MaxLabelLen           int      `json:"max_label_len"`
 	QueryTimeoutMS        int      `json:"query_timeout_ms"`
-	RetransmitMS          int      `json:"retransmit_ms"`
-	AckFlushMS            int      `json:"ack_flush_ms"`
 	KeepaliveFastMS       int      `json:"keepalive_fast_ms"`
 	KeepaliveSlowMS       int      `json:"keepalive_slow_ms"`
 	InfoRefreshMS         int      `json:"info_refresh_ms"`
@@ -39,8 +37,6 @@ type Server struct {
 	Domains                []string `json:"domains"`
 	UpstreamAddress        string   `json:"upstream_address"`
 	DownlinkPayloadBytes   int      `json:"downlink_payload_bytes"`
-	DownlinkParityShards   int      `json:"downlink_parity_shards"`
-	DownlinkRetransmitMS   int      `json:"downlink_retransmit_ms"`
 	SessionTimeoutMS       int      `json:"session_timeout_ms"`
 	SpoofTTL               int      `json:"spoof_ttl"`
 	UpstreamReadBufferSize int      `json:"upstream_read_buffer_size"`
@@ -91,12 +87,6 @@ func (c *Client) applyDefaults() {
 	if c.QueryTimeoutMS == 0 {
 		c.QueryTimeoutMS = 1800
 	}
-	if c.RetransmitMS == 0 {
-		c.RetransmitMS = 2400
-	}
-	if c.AckFlushMS == 0 {
-		c.AckFlushMS = 250
-	}
 	if c.KeepaliveFastMS == 0 {
 		c.KeepaliveFastMS = 3000
 	}
@@ -123,9 +113,6 @@ func (s *Server) applyDefaults() {
 	}
 	if s.DownlinkPayloadBytes == 0 {
 		s.DownlinkPayloadBytes = 900
-	}
-	if s.DownlinkRetransmitMS == 0 {
-		s.DownlinkRetransmitMS = 1800
 	}
 	if s.SessionTimeoutMS == 0 {
 		s.SessionTimeoutMS = int((90 * time.Second).Milliseconds())
@@ -156,10 +143,6 @@ func (c Client) validate() error {
 		return fmt.Errorf("max_label_len must be within 8..63")
 	case c.QueryTimeoutMS < 200:
 		return fmt.Errorf("query_timeout_ms must be >= 200")
-	case c.RetransmitMS < c.QueryTimeoutMS:
-		return fmt.Errorf("retransmit_ms must be >= query_timeout_ms")
-	case c.AckFlushMS < 50:
-		return fmt.Errorf("ack_flush_ms must be >= 50")
 	case c.KeepaliveFastMS < 500 || c.KeepaliveSlowMS < c.KeepaliveFastMS:
 		return fmt.Errorf("invalid keepalive intervals")
 	case c.QueueSize < 16:
@@ -178,10 +161,6 @@ func (s Server) validate() error {
 		return fmt.Errorf("upstream_address is required")
 	case s.DownlinkPayloadBytes < 256:
 		return fmt.Errorf("downlink_payload_bytes must be >= 256")
-	case s.DownlinkParityShards < 0 || s.DownlinkParityShards > 1:
-		return fmt.Errorf("downlink_parity_shards currently supports only 0 or 1")
-	case s.DownlinkRetransmitMS < 300:
-		return fmt.Errorf("downlink_retransmit_ms must be >= 300")
 	case s.SessionTimeoutMS < 1000:
 		return fmt.Errorf("session_timeout_ms must be >= 1000")
 	}

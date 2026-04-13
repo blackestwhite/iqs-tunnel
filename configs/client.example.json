@@ -17,8 +17,6 @@
   "max_qname_len": 253,
   "max_label_len": 63,
   "query_timeout_ms": 1800,
-  "retransmit_ms": 2400,
-  "ack_flush_ms": 250,
   "keepalive_fast_ms": 3000,
   "keepalive_slow_ms": 12000,
   "info_refresh_ms": 20000,

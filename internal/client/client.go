@@ -20,10 +20,9 @@ import (
 	"github.com/blackestwhite/iqs-tunnel/internal/protocol"
 )
 
-type sentPacket struct {
+type queuedPacket struct {
+	packetID uint32
 	packet   protocol.Packet
-	lastSent time.Time
-	attempts int
 }
 
 type resolverState struct {
@@ -45,20 +44,14 @@ type Client struct {
 	resolvers  []*resolverState
 	domainRR   uint32
 
-	uplinkSeq uint32
-
-	sendQueue chan uint32
-
-	sentMu      sync.Mutex
-	sentPackets map[uint32]*sentPacket
+	nextPacketID uint32
+	sendQueue    chan queuedPacket
 
 	lastLocalMu   sync.RWMutex
 	lastLocalAddr *net.UDPAddr
 
-	downRecv *protocol.ReceiverWindow
+	downSeen *protocol.SeenWindow
 	downAsm  *protocol.Reassembler
-
-	ackDirty atomic.Bool
 
 	publicIPMu sync.RWMutex
 	publicIP   net.IP
@@ -112,16 +105,15 @@ func newClient(cfg config.Client) (*Client, error) {
 	}
 
 	client := &Client{
-		cfg:         cfg,
-		secret:      []byte(cfg.Secret),
-		sessionID:   sessionID,
-		localConn:   localConn,
-		wanConn:     wanConn,
-		resolvers:   resolvers,
-		sendQueue:   make(chan uint32, cfg.QueueSize),
-		sentPackets: make(map[uint32]*sentPacket),
-		downRecv:    protocol.NewReceiverWindow(),
-		downAsm:     protocol.NewReassembler(15 * time.Second),
+		cfg:       cfg,
+		secret:    []byte(cfg.Secret),
+		sessionID: sessionID,
+		localConn: localConn,
+		wanConn:   wanConn,
+		resolvers: resolvers,
+		sendQueue: make(chan queuedPacket, cfg.QueueSize),
+		downSeen:  protocol.NewSeenWindow(),
+		downAsm:   protocol.NewReassembler(15 * time.Second),
 	}
 	client.lastDownlink.Store(time.Now().UnixNano())
 	return client, nil
@@ -158,8 +150,6 @@ func (c *Client) run(ctx context.Context) error {
 	start(c.localIngressLoop)
 	start(c.spoofReceiveLoop)
 	start(c.sendLoop)
-	start(c.retransmitLoop)
-	start(c.ackFlushLoop)
 	start(c.keepaliveLoop)
 	start(c.infoRefreshLoop)
 
@@ -231,10 +221,9 @@ func (c *Client) spoofReceiveLoop(ctx context.Context) error {
 		if packet.SessionID != c.sessionID {
 			continue
 		}
-		if !c.downRecv.MarkReceived(packet.Seq) {
+		if !c.downSeen.MarkSeen(fragment.PacketID) {
 			continue
 		}
-		c.ackDirty.Store(true)
 		c.lastDownlink.Store(time.Now().UnixNano())
 		if packet.Type != protocol.TypeData || len(packet.Payload) == 0 {
 			continue
@@ -256,29 +245,16 @@ func (c *Client) sendLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case seq := <-c.sendQueue:
-			if err := c.sendSequence(ctx, seq); err != nil {
-				log.Printf("send sequence %d: %v", seq, err)
+		case queued := <-c.sendQueue:
+			if err := c.sendPacket(ctx, queued); err != nil {
+				log.Printf("send packet %d: %v", queued.packetID, err)
 			}
 		}
 	}
 }
 
-func (c *Client) sendSequence(ctx context.Context, seq uint32) error {
-	c.sentMu.Lock()
-	sp, ok := c.sentPackets[seq]
-	if !ok {
-		c.sentMu.Unlock()
-		return nil
-	}
-	packet := sp.packet
-	c.sentMu.Unlock()
-
-	ack := c.downRecv.Snapshot()
-	packet.Ack = ack.Ack
-	packet.AckBits = ack.Bits
-
-	packetRaw, err := packet.Marshal(c.secret)
+func (c *Client) sendPacket(ctx context.Context, queued queuedPacket) error {
+	packetRaw, err := queued.packet.Marshal(c.secret)
 	if err != nil {
 		return err
 	}
@@ -290,7 +266,7 @@ func (c *Client) sendSequence(ctx context.Context, seq uint32) error {
 			return fmt.Errorf("unable to compute DNS fragment size for %s", domain)
 		}
 	}
-	fragments, err := protocol.FragmentPacket(packetRaw, c.sessionID, packet.Seq, maxPayload, 0, randUint32())
+	fragments, err := protocol.FragmentPacket(packetRaw, c.sessionID, queued.packetID, maxPayload, randUint32())
 	if err != nil {
 		return err
 	}
@@ -303,61 +279,11 @@ func (c *Client) sendSequence(ctx context.Context, seq uint32) error {
 		if len(qname) > c.cfg.MaxQNameLen {
 			return fmt.Errorf("qname too long (%d) for %s", len(qname), domain)
 		}
-		report, err := c.queryTXT(ctx, qname)
-		if err != nil {
+		if err := c.queryTXT(ctx, qname); err != nil {
 			return err
 		}
-		c.applyServerAck(report)
 	}
-
-	c.sentMu.Lock()
-	if current, ok := c.sentPackets[seq]; ok {
-		current.lastSent = time.Now()
-		current.attempts++
-	}
-	c.sentMu.Unlock()
 	return nil
-}
-
-func (c *Client) retransmitLoop(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(c.cfg.RetransmitMS) * time.Millisecond / 2)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			now := time.Now()
-			c.sentMu.Lock()
-			for seq, packet := range c.sentPackets {
-				if packet.lastSent.IsZero() || now.Sub(packet.lastSent) >= time.Duration(c.cfg.RetransmitMS)*time.Millisecond {
-					select {
-					case c.sendQueue <- seq:
-					default:
-					}
-				}
-			}
-			c.sentMu.Unlock()
-		}
-	}
-}
-
-func (c *Client) ackFlushLoop(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(c.cfg.AckFlushMS) * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if !c.ackDirty.Swap(false) {
-				continue
-			}
-			if err := c.queuePacket(protocol.TypeAckOnly, nil); err != nil {
-				return err
-			}
-		}
-	}
 }
 
 func (c *Client) keepaliveLoop(ctx context.Context) error {
@@ -434,98 +360,65 @@ func (c *Client) queueInfoPacket() error {
 }
 
 func (c *Client) queuePacket(packetType uint8, payload []byte) error {
-	ack := c.downRecv.Snapshot()
-	seq := atomic.AddUint32(&c.uplinkSeq, 1)
-	packet := protocol.Packet{
-		Type:      packetType,
-		SessionID: c.sessionID,
-		Seq:       seq,
-		Ack:       ack.Ack,
-		AckBits:   ack.Bits,
-		Payload:   payload,
+	queued := queuedPacket{
+		packetID: atomic.AddUint32(&c.nextPacketID, 1),
+		packet: protocol.Packet{
+			Type:      packetType,
+			SessionID: c.sessionID,
+			Payload:   payload,
+		},
 	}
-	c.sentMu.Lock()
-	c.sentPackets[seq] = &sentPacket{packet: packet}
-	c.sentMu.Unlock()
 	select {
-	case c.sendQueue <- seq:
+	case c.sendQueue <- queued:
 		return nil
 	default:
 		return fmt.Errorf("send queue is full")
 	}
 }
 
-func (c *Client) queryTXT(ctx context.Context, qname string) (protocol.AckReport, error) {
+func (c *Client) queryTXT(ctx context.Context, qname string) error {
 	resolver := c.pickResolver()
 	if resolver == nil {
-		return protocol.AckReport{}, fmt.Errorf("no resolver available")
+		return fmt.Errorf("no resolver available")
 	}
 	conn, err := net.DialUDP("udp4", nil, resolver.addr)
 	if err != nil {
 		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
+		return err
 	}
 	defer conn.Close()
 
 	queryID := uint16(randUint32())
 	query, err := dnsmsg.BuildTXTQuery(queryID, qname)
 	if err != nil {
-		return protocol.AckReport{}, err
+		return err
 	}
 
 	start := time.Now()
 	if err := conn.SetDeadline(time.Now().Add(time.Duration(c.cfg.QueryTimeoutMS) * time.Millisecond)); err != nil {
-		return protocol.AckReport{}, err
+		return err
 	}
 	if _, err := conn.Write(query); err != nil {
 		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
+		return err
 	}
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
 		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
+		return err
 	}
-	id, txts, err := dnsmsg.ParseTXTResponse(buf[:n])
+	id, _, err := dnsmsg.ParseTXTResponse(buf[:n])
 	if err != nil {
 		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
+		return err
 	}
 	if id != queryID {
 		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, fmt.Errorf("dns id mismatch")
-	}
-	if len(txts) == 0 {
-		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, fmt.Errorf("dns response did not contain a TXT ack")
-	}
-	rawReport, err := protocol.DecodeBase32NoPad(txts[0])
-	if err != nil {
-		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
-	}
-	report, err := protocol.UnmarshalAckReport(rawReport, c.secret)
-	if err != nil {
-		c.recordResolverFailure(resolver)
-		return protocol.AckReport{}, err
+		return fmt.Errorf("dns id mismatch")
 	}
 	c.recordResolverSuccess(resolver, time.Since(start))
-	return report, nil
-}
-
-func (c *Client) applyServerAck(report protocol.AckReport) {
-	if report.SessionID != c.sessionID {
-		return
-	}
-	ack := protocol.AckState{Ack: report.Ack, Bits: report.AckBits}
-	c.sentMu.Lock()
-	defer c.sentMu.Unlock()
-	for seq := range c.sentPackets {
-		if ack.Acks(seq) {
-			delete(c.sentPackets, seq)
-		}
-	}
+	return nil
 }
 
 func (c *Client) pickDomain() string {

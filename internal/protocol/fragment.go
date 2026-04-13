@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"strings"
 	"sync"
 	"time"
@@ -13,19 +12,16 @@ import (
 const (
 	FragmentMagic   = "IQF"
 	FragmentVersion = 1
-	FlagParity      = 1 << 0
 )
 
 type Fragment struct {
 	Version       uint8
 	SessionID     uint64
-	PacketSeq     uint32
+	PacketID      uint32
 	PacketSize    uint32
 	Nonce         uint32
 	FragmentIndex uint8
-	DataShards    uint8
-	ParityShards  uint8
-	Flags         uint8
+	FragmentCount uint8
 	Payload       []byte
 }
 
@@ -36,26 +32,22 @@ func (f Fragment) MarshalBinary() ([]byte, error) {
 	if len(f.Payload) > 65535 {
 		return nil, fmt.Errorf("fragment payload too large: %d", len(f.Payload))
 	}
-	buf := bytes.NewBuffer(make([]byte, 0, 30+len(f.Payload)+4))
+	buf := bytes.NewBuffer(make([]byte, 0, 28+len(f.Payload)))
 	buf.WriteString(FragmentMagic)
 	buf.WriteByte(f.Version)
 	_ = binary.Write(buf, binary.BigEndian, f.SessionID)
-	_ = binary.Write(buf, binary.BigEndian, f.PacketSeq)
+	_ = binary.Write(buf, binary.BigEndian, f.PacketID)
 	_ = binary.Write(buf, binary.BigEndian, f.PacketSize)
 	_ = binary.Write(buf, binary.BigEndian, f.Nonce)
 	buf.WriteByte(f.FragmentIndex)
-	buf.WriteByte(f.DataShards)
-	buf.WriteByte(f.ParityShards)
-	buf.WriteByte(f.Flags)
+	buf.WriteByte(f.FragmentCount)
 	_ = binary.Write(buf, binary.BigEndian, uint16(len(f.Payload)))
 	buf.Write(f.Payload)
-	crc := crc32.ChecksumIEEE(buf.Bytes())
-	_ = binary.Write(buf, binary.BigEndian, crc)
 	return buf.Bytes(), nil
 }
 
 func UnmarshalFragment(raw []byte) (Fragment, error) {
-	if len(raw) < 30 {
+	if len(raw) < 28 {
 		return Fragment{}, fmt.Errorf("fragment too short")
 	}
 	if string(raw[:3]) != FragmentMagic {
@@ -64,32 +56,22 @@ func UnmarshalFragment(raw []byte) (Fragment, error) {
 	if raw[3] != FragmentVersion {
 		return Fragment{}, fmt.Errorf("unsupported fragment version %d", raw[3])
 	}
-	wantCRC := binary.BigEndian.Uint32(raw[len(raw)-4:])
-	if got := crc32.ChecksumIEEE(raw[:len(raw)-4]); got != wantCRC {
-		return Fragment{}, fmt.Errorf("fragment crc mismatch")
-	}
-	payloadLen := int(binary.BigEndian.Uint16(raw[28:30]))
-	if len(raw) != 30+payloadLen+4 {
+	payloadLen := int(binary.BigEndian.Uint16(raw[26:28]))
+	if len(raw) != 28+payloadLen {
 		return Fragment{}, fmt.Errorf("fragment payload length mismatch")
 	}
 	f := Fragment{
 		Version:       raw[3],
 		SessionID:     binary.BigEndian.Uint64(raw[4:12]),
-		PacketSeq:     binary.BigEndian.Uint32(raw[12:16]),
+		PacketID:      binary.BigEndian.Uint32(raw[12:16]),
 		PacketSize:    binary.BigEndian.Uint32(raw[16:20]),
 		Nonce:         binary.BigEndian.Uint32(raw[20:24]),
 		FragmentIndex: raw[24],
-		DataShards:    raw[25],
-		ParityShards:  raw[26],
-		Flags:         raw[27],
-	}
-	payloadLen = int(binary.BigEndian.Uint16(raw[28:30]))
-	if len(raw) != 30+payloadLen+4 {
-		return Fragment{}, fmt.Errorf("fragment payload length mismatch")
+		FragmentCount: raw[25],
 	}
 	if payloadLen > 0 {
 		f.Payload = make([]byte, payloadLen)
-		copy(f.Payload, raw[30:30+payloadLen])
+		copy(f.Payload, raw[28:28+payloadLen])
 	}
 	return f, nil
 }
@@ -99,12 +81,11 @@ func MaxDNSRawFragmentPayload(baseDomain string, maxQNameLen, maxLabelLen int) i
 	for payload := 1024; payload >= 32; payload-- {
 		frag := Fragment{
 			SessionID:     1,
-			PacketSeq:     1,
+			PacketID:      1,
 			PacketSize:    uint32(payload),
 			Nonce:         1,
 			FragmentIndex: 0,
-			DataShards:    1,
-			ParityShards:  0,
+			FragmentCount: 1,
 			Payload:       make([]byte, payload),
 		}
 		raw, _ := frag.MarshalBinary()
@@ -150,20 +131,16 @@ func DecodeDNSName(qname, baseDomain string) ([]byte, error) {
 	return DecodeBase32NoPad(strings.ReplaceAll(qname, ".", ""))
 }
 
-func FragmentPacket(packetRaw []byte, sessionID uint64, packetSeq uint32, maxPayload int, parityShards int, nonce uint32) ([]Fragment, error) {
+func FragmentPacket(packetRaw []byte, sessionID uint64, packetID uint32, maxPayload int, nonce uint32) ([]Fragment, error) {
 	if maxPayload <= 0 {
 		return nil, fmt.Errorf("maxPayload must be positive")
 	}
-	if parityShards < 0 || parityShards > 1 {
-		return nil, fmt.Errorf("only 0 or 1 parity shard is supported")
+	fragmentCount := (len(packetRaw) + maxPayload - 1) / maxPayload
+	if fragmentCount == 0 {
+		fragmentCount = 1
 	}
-	dataShards := (len(packetRaw) + maxPayload - 1) / maxPayload
-	if dataShards == 0 {
-		dataShards = 1
-	}
-	fragments := make([]Fragment, 0, dataShards+parityShards)
-	maxShardLen := 0
-	for i := 0; i < dataShards; i++ {
+	fragments := make([]Fragment, 0, fragmentCount)
+	for i := 0; i < fragmentCount; i++ {
 		start := i * maxPayload
 		end := start + maxPayload
 		if end > len(packetRaw) {
@@ -171,39 +148,14 @@ func FragmentPacket(packetRaw []byte, sessionID uint64, packetSeq uint32, maxPay
 		}
 		payload := make([]byte, end-start)
 		copy(payload, packetRaw[start:end])
-		if len(payload) > maxShardLen {
-			maxShardLen = len(payload)
-		}
 		fragments = append(fragments, Fragment{
 			SessionID:     sessionID,
-			PacketSeq:     packetSeq,
+			PacketID:      packetID,
 			PacketSize:    uint32(len(packetRaw)),
 			Nonce:         nonce,
 			FragmentIndex: uint8(i),
-			DataShards:    uint8(dataShards),
-			ParityShards:  uint8(parityShards),
+			FragmentCount: uint8(fragmentCount),
 			Payload:       payload,
-		})
-	}
-	if parityShards == 1 && dataShards > 1 {
-		parity := make([]byte, maxShardLen)
-		for _, fragment := range fragments {
-			for i := range parity {
-				if i < len(fragment.Payload) {
-					parity[i] ^= fragment.Payload[i]
-				}
-			}
-		}
-		fragments = append(fragments, Fragment{
-			SessionID:     sessionID,
-			PacketSeq:     packetSeq,
-			PacketSize:    uint32(len(packetRaw)),
-			Nonce:         nonce,
-			FragmentIndex: uint8(dataShards),
-			DataShards:    uint8(dataShards),
-			ParityShards:  1,
-			Flags:         FlagParity,
-			Payload:       parity,
 		})
 	}
 	return fragments, nil
@@ -211,16 +163,14 @@ func FragmentPacket(packetRaw []byte, sessionID uint64, packetSeq uint32, maxPay
 
 type packetKey struct {
 	sessionID uint64
-	packetSeq uint32
+	packetID  uint32
 }
 
 type reassemblyEntry struct {
-	packetSize   uint32
-	dataShards   uint8
-	parityShards uint8
-	pieces       map[uint8][]byte
-	createdAt    time.Time
-	lastTouch    time.Time
+	packetSize    uint32
+	fragmentCount uint8
+	pieces        map[uint8][]byte
+	lastTouch     time.Time
 }
 
 type Reassembler struct {
@@ -242,21 +192,19 @@ func (r *Reassembler) Add(fragment Fragment) ([]byte, bool, error) {
 
 	now := time.Now()
 	r.cleanupLocked(now)
-	key := packetKey{sessionID: fragment.SessionID, packetSeq: fragment.PacketSeq}
+	key := packetKey{sessionID: fragment.SessionID, packetID: fragment.PacketID}
 	entry, ok := r.entries[key]
 	if !ok {
 		entry = &reassemblyEntry{
-			packetSize:   fragment.PacketSize,
-			dataShards:   fragment.DataShards,
-			parityShards: fragment.ParityShards,
-			pieces:       make(map[uint8][]byte, int(fragment.DataShards)+int(fragment.ParityShards)),
-			createdAt:    now,
-			lastTouch:    now,
+			packetSize:    fragment.PacketSize,
+			fragmentCount: fragment.FragmentCount,
+			pieces:        make(map[uint8][]byte, int(fragment.FragmentCount)),
+			lastTouch:     now,
 		}
 		r.entries[key] = entry
 	}
-	if entry.packetSize != fragment.PacketSize || entry.dataShards != fragment.DataShards || entry.parityShards != fragment.ParityShards {
-		return nil, false, fmt.Errorf("fragment metadata mismatch for packet %d", fragment.PacketSeq)
+	if entry.packetSize != fragment.PacketSize || entry.fragmentCount != fragment.FragmentCount {
+		return nil, false, fmt.Errorf("fragment metadata mismatch for packet %d", fragment.PacketID)
 	}
 	if _, exists := entry.pieces[fragment.FragmentIndex]; exists {
 		return nil, false, nil
@@ -286,72 +234,22 @@ func (r *Reassembler) cleanupLocked(now time.Time) {
 }
 
 func (e *reassemblyEntry) tryAssemble() ([]byte, bool, error) {
-	if e.dataShards == 0 {
-		return nil, false, fmt.Errorf("invalid shard count")
+	if e.fragmentCount == 0 {
+		return nil, false, fmt.Errorf("invalid fragment count")
 	}
-	missing := -1
-	for i := uint8(0); i < e.dataShards; i++ {
-		if _, ok := e.pieces[i]; !ok {
-			if missing >= 0 {
-				return nil, false, nil
-			}
-			missing = int(i)
-		}
+	if len(e.pieces) != int(e.fragmentCount) {
+		return nil, false, nil
 	}
-	if missing >= 0 {
-		if e.parityShards != 1 {
-			return nil, false, nil
-		}
-		parityIndex := e.dataShards
-		parity, ok := e.pieces[parityIndex]
+	buf := make([]byte, 0, e.packetSize)
+	for i := uint8(0); i < e.fragmentCount; i++ {
+		piece, ok := e.pieces[i]
 		if !ok {
 			return nil, false, nil
 		}
-		recovered := make([]byte, len(parity))
-		copy(recovered, parity)
-		for i := uint8(0); i < e.dataShards; i++ {
-			if int(i) == missing {
-				continue
-			}
-			payload := e.pieces[i]
-			for j := range recovered {
-				if j < len(payload) {
-					recovered[j] ^= payload[j]
-				}
-			}
-		}
-		e.pieces[uint8(missing)] = trimRecovered(recovered, int(e.packetSize), int(e.dataShards), missing)
-	}
-
-	buf := make([]byte, 0, e.packetSize)
-	for i := uint8(0); i < e.dataShards; i++ {
-		buf = append(buf, e.pieces[i]...)
+		buf = append(buf, piece...)
 	}
 	if uint32(len(buf)) < e.packetSize {
 		return nil, false, fmt.Errorf("assembled packet too short")
 	}
 	return buf[:e.packetSize], true, nil
-}
-
-func trimRecovered(recovered []byte, packetSize int, dataShards int, shardIndex int) []byte {
-	if dataShards <= 1 {
-		out := make([]byte, packetSize)
-		copy(out, recovered[:packetSize])
-		return out
-	}
-
-	expected := len(recovered)
-	if shardIndex == dataShards-1 {
-		fullShards := dataShards - 1
-		remaining := packetSize - (fullShards * len(recovered))
-		if remaining > 0 && remaining < expected {
-			expected = remaining
-		}
-	}
-	if expected > len(recovered) {
-		expected = len(recovered)
-	}
-	out := make([]byte, expected)
-	copy(out, recovered[:expected])
-	return out
 }

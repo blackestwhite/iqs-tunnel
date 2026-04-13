@@ -15,12 +15,6 @@ import (
 	"github.com/blackestwhite/iqs-tunnel/internal/rawip"
 )
 
-type downPacket struct {
-	packet   protocol.Packet
-	lastSent time.Time
-	attempts int
-}
-
 type session struct {
 	id uint64
 
@@ -31,15 +25,13 @@ type session struct {
 	info    protocol.InfoPayload
 	hasInfo bool
 
-	uplinkRecv *protocol.ReceiverWindow
+	uplinkSeen *protocol.SeenWindow
 	uplinkAsm  *protocol.Reassembler
 
 	upstreamConn *net.UDPConn
 
-	nextDownSeq uint32
-	downSent    map[uint32]*downPacket
-
-	lastSeen time.Time
+	nextDownPacketID uint32
+	lastSeen         time.Time
 }
 
 type Server struct {
@@ -108,7 +100,6 @@ func (s *Server) run(ctx context.Context) error {
 	}
 
 	start(s.dnsLoop)
-	start(s.retransmitLoop)
 	start(s.cleanupLoop)
 
 	select {
@@ -173,76 +164,34 @@ func (s *Server) handleDNSPacket(ctx context.Context, addr *net.UDPAddr, packet 
 			return err
 		}
 		if tunnelPacket.SessionID != session.id {
-			return fmt.Errorf("session mismatch for packet %d", tunnelPacket.Seq)
+			return fmt.Errorf("session mismatch for packet %d", fragment.PacketID)
 		}
-		session.handlePeerAck(protocol.AckState{Ack: tunnelPacket.Ack, Bits: tunnelPacket.AckBits})
-		if tunnelPacket.Type == protocol.TypeInfo {
-			info, err := protocol.ParseInfoPayload(tunnelPacket.Payload)
-			if err != nil {
-				return err
-			}
-			if err := session.updateInfo(ctx, info); err != nil {
-				return err
-			}
-		}
-		if isNew := session.uplinkRecv.MarkReceived(tunnelPacket.Seq); isNew {
+		if session.uplinkSeen.MarkSeen(fragment.PacketID) {
 			switch tunnelPacket.Type {
 			case protocol.TypeData:
 				if err := session.forwardUpstream(tunnelPacket.Payload); err != nil {
 					return err
 				}
-			case protocol.TypeAckOnly, protocol.TypeKeepalive, protocol.TypeInfo:
+			case protocol.TypeInfo:
+				info, err := protocol.ParseInfoPayload(tunnelPacket.Payload)
+				if err != nil {
+					return err
+				}
+				if err := session.updateInfo(ctx, info); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unsupported packet type %d", tunnelPacket.Type)
 			}
 		}
 	}
 
-	ack := session.uplinkRecv.Snapshot()
-	response, err := dnsmsg.BuildTXTResponse(question, protocol.EncodeBase32NoPad((protocol.AckReport{
-		SessionID: session.id,
-		Ack:       ack.Ack,
-		AckBits:   ack.Bits,
-	}).Marshal(s.secret)))
+	response, err := dnsmsg.BuildTXTResponse(question, "")
 	if err != nil {
 		return err
 	}
 	_, err = s.dnsConn.WriteToUDP(response, addr)
 	return err
-}
-
-func (s *Server) retransmitLoop(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(s.cfg.DownlinkRetransmitMS) * time.Millisecond / 2)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			now := time.Now()
-			s.sessionsMu.RLock()
-			sessions := make([]*session, 0, len(s.sessions))
-			for _, session := range s.sessions {
-				sessions = append(sessions, session)
-			}
-			s.sessionsMu.RUnlock()
-			for _, session := range sessions {
-				session.mu.Lock()
-				var resend []*downPacket
-				for _, packet := range session.downSent {
-					if packet.lastSent.IsZero() || now.Sub(packet.lastSent) >= time.Duration(s.cfg.DownlinkRetransmitMS)*time.Millisecond {
-						resend = append(resend, packet)
-					}
-				}
-				session.mu.Unlock()
-				for _, packet := range resend {
-					if err := session.sendDownPacket(packet); err != nil {
-						log.Printf("resend session %d seq %d: %v", session.id, packet.packet.Seq, err)
-					}
-				}
-			}
-		}
-	}
 }
 
 func (s *Server) cleanupLoop(ctx context.Context) error {
@@ -301,9 +250,8 @@ func (s *Server) getSession(id uint64) *session {
 	session := &session{
 		id:         id,
 		server:     s,
-		uplinkRecv: protocol.NewReceiverWindow(),
+		uplinkSeen: protocol.NewSeenWindow(),
 		uplinkAsm:  protocol.NewReassembler(15 * time.Second),
-		downSent:   make(map[uint32]*downPacket),
 		lastSeen:   time.Now(),
 	}
 	s.sessions[id] = session
@@ -392,39 +340,23 @@ func (sess *session) upstreamLoop(ctx context.Context, conn *net.UDPConn) error 
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-		ack := sess.uplinkRecv.Snapshot()
 		sess.mu.Lock()
-		sess.nextDownSeq++
-		seq := sess.nextDownSeq
+		sess.nextDownPacketID++
+		packetID := sess.nextDownPacketID
 		packet := protocol.Packet{
 			Type:      protocol.TypeData,
 			SessionID: sess.id,
-			Seq:       seq,
-			Ack:       ack.Ack,
-			AckBits:   ack.Bits,
 			Payload:   payload,
 		}
-		down := &downPacket{packet: packet}
-		sess.downSent[seq] = down
 		sess.lastSeen = time.Now()
 		sess.mu.Unlock()
-		if err := sess.sendDownPacket(down); err != nil {
-			log.Printf("send downlink session %d seq %d: %v", sess.id, seq, err)
+		if err := sess.sendDownPacket(packetID, packet); err != nil {
+			log.Printf("send downlink session %d packet %d: %v", sess.id, packetID, err)
 		}
 	}
 }
 
-func (sess *session) handlePeerAck(ack protocol.AckState) {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	for seq := range sess.downSent {
-		if ack.Acks(seq) {
-			delete(sess.downSent, seq)
-		}
-	}
-}
-
-func (sess *session) sendDownPacket(packet *downPacket) error {
+func (sess *session) sendDownPacket(packetID uint32, packet protocol.Packet) error {
 	sess.mu.Lock()
 	if !sess.hasInfo {
 		sess.mu.Unlock()
@@ -434,11 +366,11 @@ func (sess *session) sendDownPacket(packet *downPacket) error {
 	sess.lastSeen = time.Now()
 	sess.mu.Unlock()
 
-	rawPacket, err := packet.packet.Marshal(sess.server.secret)
+	rawPacket, err := packet.Marshal(sess.server.secret)
 	if err != nil {
 		return err
 	}
-	fragments, err := protocol.FragmentPacket(rawPacket, sess.id, packet.packet.Seq, sess.server.cfg.DownlinkPayloadBytes, sess.server.cfg.DownlinkParityShards, 0)
+	fragments, err := protocol.FragmentPacket(rawPacket, sess.id, packetID, sess.server.cfg.DownlinkPayloadBytes, 0)
 	if err != nil {
 		return err
 	}
@@ -453,9 +385,5 @@ func (sess *session) sendDownPacket(packet *downPacket) error {
 			return err
 		}
 	}
-	sess.mu.Lock()
-	packet.lastSent = time.Now()
-	packet.attempts++
-	sess.mu.Unlock()
 	return nil
 }

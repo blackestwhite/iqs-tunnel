@@ -1,11 +1,11 @@
 # IQS-Tunnel
 
-IQS-Tunnel is an improved Go rewrite of QS-Tunnel. It keeps the same asymmetric transport idea:
+IQS-Tunnel is a lighter Go rewrite of QS-Tunnel. It keeps the same asymmetric transport idea:
 
 - uplink travels inside DNS query names
 - downlink returns over spoofed UDP packets
 
-The difference is that IQS-Tunnel adds a reliability layer around that transport instead of sending blindly.
+The difference is that this revision keeps the tunnel layer intentionally small. It does not try to do in-tunnel ARQ, ACK tracking, or retransmission for already-reliable inner transports.
 
 Original QS-Tunnel repository:
 
@@ -13,7 +13,7 @@ https://github.com/patterniha/QS-Tunnel
 
 ## Research Notice
 
-This project is a research prototype for studying DNS-based uplink transport, spoofed UDP downlink behavior, and reliability techniques around asymmetric tunnels. It is not presented as a production-ready censorship circumvention product.
+This project is a research prototype for studying DNS-based uplink transport, spoofed UDP downlink behavior, and lightweight framing around asymmetric tunnels. It is not presented as a production-ready censorship circumvention product.
 
 ## Warning
 
@@ -22,52 +22,32 @@ This project is a research prototype for studying DNS-based uplink transport, sp
 
 ## What Changed
 
-- DNS responses now carry a signed ACK report, so the client knows which uplink packets really reached the server.
-- Every tunnel packet includes `session_id`, `seq`, `ack`, and `ack_bits`.
-- The client acknowledges spoofed downlink packets in later DNS uplink packets, so the server can retransmit only what is still missing.
-- DNS retries are cache-busted with per-send fragment nonces.
+- The project is a native Go rewrite of the original Python idea.
+- The tunnel keeps `session_id` so multi-client state stays separated.
+- Packets are still authenticated with a shared secret, so garbage or tampered tunnel packets are rejected.
+- DNS fragments still use per-send nonces to avoid accidental cache collisions.
 - The client keeps basic performance scores for resolvers and prefers healthier ones.
-- Optional single-parity shard protection is available on the spoofed downlink path.
+- NAT keepalives and periodic client info refresh remain in place for the spoofed return path.
 
-## On Overhead and Trade-Offs
+## Why This Revision Is Lighter
 
-One fair criticism of this design is that it adds more control metadata than the original QS-Tunnel approach. That criticism is true in spirit: IQS-Tunnel deliberately spends extra bytes on sequencing, acknowledgements, session tracking, cache-busting, and packet authentication.
+Earlier IQS experiments added in-tunnel sequencing, ACK reports, retransmission state, ACK-only DNS packets, and parity shards. That made the tunnel easier to observe, but it also duplicated work that is already done by inner reliable transports such as KCP, QUIC streams, or TCP-like layers.
 
-The reason is simple: the original idea is lightweight, but also much more dependent on luck. Once DNS queries are dropped, reordered, cached, duplicated, or partially lost, a tunnel without feedback becomes hard to reason about and hard to recover. IQS-Tunnel chooses to pay additional overhead in exchange for better visibility into what arrived, what was lost, and what should be retransmitted.
+This branch removes that extra ARQ-style machinery and keeps only what is still useful at the tunnel edge itself:
 
-In other words, this project does not try to be the smallest possible wrapper around QS-Tunnel. It tries to be a more observable, debuggable, and recoverable research transport, even if that means extra header cost and lower raw efficiency.
+- session separation
+- fragment IDs for reassembly and duplicate suppression
+- nonce-based DNS cache busting
+- authenticated tunnel packets
+- NAT maintenance for spoofed downlink
 
-## Performance Trade-Offs
-
-The current design can absolutely be slower than a lighter QS-style tunnel, especially for small packets.
-
-These are rough theoretical overhead estimates from the current framing design, not real-world benchmark numbers:
-
-| Traffic shape | Rough byte expansion | Practical meaning |
-|---|---:|---|
-| Small uplink payloads around 64 bytes | about 1.95x | noticeably worse goodput |
-| Medium uplink payloads around 256 bytes | about 1.27x | moderate overhead |
-| Larger uplink payloads around 512 bytes | about 1.14x | smaller but still visible cost |
-| Large uplink payloads around 1024 bytes | about 1.07x | relatively mild overhead |
-| Small downlink payloads around 64 bytes | about 2.31x | very expensive for chatty traffic |
-| Medium downlink payloads around 256 bytes | about 1.33x | meaningful overhead |
-| Larger downlink payloads around 512 bytes | about 1.16x | still measurable |
-| Downlink payloads near the fragmentation threshold with default parity enabled | about 2.05x to 2.17x | can become almost twice as heavy |
-
-In short:
-
-- small and chatty traffic can get a lot slower
-- medium traffic usually pays a visible penalty
-- large packets suffer less
-- the default parity setting on the downlink is one of the biggest cost multipliers
-
-So the honest trade-off is this: IQS-Tunnel is trying to be more recoverable and easier to reason about, not maximally lightweight. In some networks that trade-off may be worth it, and in others it may not.
+In other words, IQS-Tunnel is no longer trying to be a mini transport protocol inside the tunnel. If you want reliability, recovery, congestion handling, or ordering, keep that in the protocol you run through the tunnel.
 
 ## Layout
 
 - `cmd/iqs-client`: local client binary
 - `cmd/iqs-server`: authoritative DNS + spoof server binary
-- `internal/protocol`: wire format, ACK logic, fragmentation, parity
+- `internal/protocol`: wire format, fragmentation, session tagging, nonce handling
 - `internal/dnsmsg`: minimal DNS TXT query/response codec
 - `internal/rawip`: raw IPv4 UDP sender used for spoofed downlink
 
@@ -76,7 +56,7 @@ So the honest trade-off is this: IQS-Tunnel is trying to be more recoverable and
 - The server must be authoritative for the configured domains.
 - The server needs permission to open a raw IPv4 socket in order to send spoofed UDP.
 - The client still needs to transmit uplink traffic. Spoofing is only for the return path.
-- This layer is still a UDP forwarder. A reliable encrypted UDP protocol such as Hysteria, WireGuard, or a QUIC-based transport should sit above it.
+- IQS-Tunnel itself is not a reliable transport. If you need recovery and ordering, keep that in the inner transport you run through the tunnel.
 - The release binaries are intended for research and controlled testing. You are responsible for legal, policy, and operational compliance when using them.
 
 ## Releases
@@ -103,15 +83,13 @@ sequenceDiagram
     App->>Client: UDP payload
     Client->>Resolver: DNS query with encoded tunnel fragments
     Resolver->>Server: Forward authoritative query
-    Server-->>Resolver: DNS TXT response with signed ACK report
+    Server-->>Resolver: DNS TXT response
     Resolver-->>Client: DNS reply
-
-    Note over Client,Server: Uplink reliability lives on DNS ACK/ACK-bits
 
     Server->>Upstream: Forward recovered UDP payload
     Upstream->>Server: UDP response
 
-    Note over Server,Client: Downlink uses spoofed UDP + client ACKs piggybacked in later DNS uplink packets
+    Note over Client,Server: No in-tunnel ARQ here; reliability belongs to the inner transport if needed
 
     Server-->>Client: Spoofed UDP tunnel fragments
     Client->>App: Reassembled UDP payload
@@ -145,11 +123,11 @@ You can also print the embedded build version:
 ## Protocol Summary
 
 1. The local app sends UDP to the client bind address.
-2. The client wraps the datagram in a signed tunnel packet and splits it into DNS-safe fragments.
+2. The client wraps the datagram in an authenticated tunnel packet and splits it into DNS-safe fragments.
 3. Recursive resolvers forward the query to the authoritative server.
-4. The authoritative server reassembles the packet, forwards the UDP payload upstream, and returns a TXT ACK report in the DNS response.
-5. Upstream responses are wrapped in signed downlink packets, fragmented if needed, and sent back as spoofed UDP.
-6. The client reassembles them, forwards the payload locally, and piggybacks downlink ACK state on later DNS uplink packets.
+4. The authoritative server reassembles the packet, forwards the UDP payload upstream, and returns a normal DNS response.
+5. Upstream responses are wrapped in authenticated downlink packets, fragmented if needed, and sent back as spoofed UDP.
+6. The client reassembles them, suppresses duplicates, and forwards the payload locally.
 
 ## Support The Project
 

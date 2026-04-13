@@ -7,9 +7,6 @@ func TestPacketRoundTrip(t *testing.T) {
 	raw, err := (Packet{
 		Type:      TypeData,
 		SessionID: 77,
-		Seq:       9,
-		Ack:       3,
-		AckBits:   0b1011,
 		Payload:   []byte("hello"),
 	}).Marshal(secret)
 	if err != nil {
@@ -19,28 +16,25 @@ func TestPacketRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal packet: %v", err)
 	}
-	if got.SessionID != 77 || got.Seq != 9 || got.Ack != 3 || got.AckBits != 0b1011 || string(got.Payload) != "hello" {
+	if got.SessionID != 77 || got.Type != TypeData || string(got.Payload) != "hello" {
 		t.Fatalf("unexpected packet: %+v", got)
 	}
 }
 
-func TestReassemblerWithParity(t *testing.T) {
+func TestReassemblerRoundTrip(t *testing.T) {
 	payload := make([]byte, 1400)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	fragments, err := FragmentPacket(payload, 1, 10, 400, 1, 123)
+	fragments, err := FragmentPacket(payload, 1, 10, 400, 123)
 	if err != nil {
 		t.Fatalf("fragment packet: %v", err)
 	}
 	if len(fragments) < 4 {
-		t.Fatalf("expected parity fragment, got %d fragments", len(fragments))
+		t.Fatalf("expected multiple fragments, got %d", len(fragments))
 	}
 	reassembler := NewReassembler(0)
-	for i, fragment := range fragments {
-		if i == 1 {
-			continue
-		}
+	for _, fragment := range fragments {
 		packet, done, err := reassembler.Add(fragment)
 		if err != nil {
 			t.Fatalf("add fragment: %v", err)
@@ -57,18 +51,24 @@ func TestReassemblerWithParity(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("reassembler did not complete with one missing shard plus parity")
+	t.Fatal("reassembler did not complete")
 }
 
-func TestReceiverWindowSnapshot(t *testing.T) {
-	w := NewReceiverWindow()
-	if !w.MarkReceived(5) {
+func TestSeenWindow(t *testing.T) {
+	w := NewSeenWindow()
+	if !w.MarkSeen(5) {
 		t.Fatal("expected first packet to be new")
 	}
-	w.MarkReceived(7)
-	w.MarkReceived(6)
-	state := w.Snapshot()
-	if state.Ack != 7 || state.Bits != 0 {
-		t.Fatalf("unexpected ack state: %+v", state)
+	if w.MarkSeen(5) {
+		t.Fatal("expected duplicate packet to be rejected")
+	}
+	if !w.MarkSeen(7) {
+		t.Fatal("expected new out-of-order packet to be accepted")
+	}
+	if !w.MarkSeen(6) {
+		t.Fatal("expected missing packet to be accepted")
+	}
+	if w.MarkSeen(6) {
+		t.Fatal("expected duplicate after merge to be rejected")
 	}
 }
