@@ -89,7 +89,7 @@ sequenceDiagram
     Server->>Upstream: Forward recovered UDP payload
     Upstream->>Server: UDP response
 
-    Note over Client,Server: No in-tunnel ARQ here; reliability belongs to the inner transport if needed
+    Note over Client,Server: Inner transport handles reliability
 
     Server-->>Client: Spoofed UDP tunnel fragments
     Client->>App: Reassembled UDP payload
